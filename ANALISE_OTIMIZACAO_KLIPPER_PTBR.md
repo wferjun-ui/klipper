@@ -1,231 +1,86 @@
-# Análise de melhorias focada **somente em funções do firmware Klipper**
+# Análise crítica de funções do Klipper + melhorias propostas/implementadas
 
-> Escopo deste documento: **apenas recursos nativos do Klipper** (módulos, comandos e estratégias de configuração do firmware).
-> 
-> Fora de escopo: ajustes mecânicos, troca de hardware, melhorias de slicer e alterações de software externo.
+Este documento foi refeito para focar no que você pediu:
 
-## 1) Estratégia: extrair o máximo do Klipper via recursos internos
-
-Para “aproximar do perfeito” no nível de firmware, o ganho vem de combinar corretamente estes blocos:
-
-1. **Qualidade dinâmica de movimento** (`input_shaper`, limites dinâmicos)
-2. **Controle de extrusão dinâmica** (`pressure_advance`)
-3. **Primeira camada inteligente** (`bed_mesh`, `fade`, malha adaptativa por macro)
-4. **Compensações geométricas/termais** (`axis_twist_compensation`, `skew_correction`, `z_thermal_adjust`)
-5. **Nivelamento automático por arquitetura** (`z_tilt`, `quad_gantry_level`, `screws_tilt_adjust`)
-6. **Automação por macros** (rotina de preparo, validação e fallback)
+1. **melhorar funções** (não só listar recursos),
+2. **analisar fragilidades reais**,
+3. **entregar um fluxo guiado de calibração passo-a-passo com botão/instrução ao usuário**.
 
 ---
 
-## 2) Funções do Klipper com maior impacto direto
+## 1) Fragilidades detectadas em função real do código
 
-## 2.1 `input_shaper` (vibração, ghosting, cantos)
+Módulo analisado: `klippy/extras/screws_tilt_adjust.py`
 
-**Função:** reduzir ressonância sem sacrificar tanto tempo de impressão.
+### Fragilidade A — arredondamento de minutos pode gerar `:60`
 
-**Recomendação de firmware:**
-- Manter `[input_shaper]` ativo e versionado por perfil.
-- Usar `SET_INPUT_SHAPER` para comparação rápida entre tipos (`mzv`, `ei`) e frequências.
-- Criar macro de teste A/B de shaper (mesmo gcode, parâmetros diferentes).
+Na função de cálculo de ajuste das roscas, o arredondamento de minutos podia produzir `60`, resultando em saída inválida/estranha para o usuário (ex.: `02:60`).
 
-**Comandos úteis:**
-- `SET_INPUT_SHAPER SHAPER_TYPE=MZV`
-- `SET_INPUT_SHAPER SHAPER_TYPE=EI`
-- `SET_INPUT_SHAPER SHAPER_FREQ_X=<hz> SHAPER_FREQ_Y=<hz>`
+### Fragilidade B — validação de `MAX_DEVIATION` dependia de truthy/falsy
+
+A validação usava `if self.max_diff ...`, o que ignora casos limite (ex.: `0.0`) por comportamento booleano, ao invés de checagem explícita.
 
 ---
 
-## 2.2 `pressure_advance` (cantos, costura, transientes)
+## 2) Melhorias implementadas no código
 
-**Função:** melhorar transições de fluxo em aceleração/desaceleração.
+### Melhoria 1 — normalização de minuto 60 -> incremento de volta completa
 
-**Recomendação de firmware:**
-- Salvar PA por material/perfil via macro (`SET_PRESSURE_ADVANCE`).
-- Evitar PA único global para todos os cenários.
-- Manter `pressure_advance_smooth_time` conservador para evitar artefatos.
+Quando o arredondamento gera 60 minutos:
+- incrementa `full_turns` em 1,
+- força `minutes = 0`.
 
-**Comando útil:**
-- `SET_PRESSURE_ADVANCE ADVANCE=<valor> SMOOTH_TIME=<valor>`
+Resultado: saída sempre coerente no formato de ajuste.
 
----
+### Melhoria 2 — comparação robusta para `MAX_DEVIATION`
 
-## 2.3 `bed_mesh` (primeira camada em toda a mesa)
+Troca de condição para:
+- `self.max_diff is not None`
 
-**Função:** compensar irregularidade de plano via malha.
-
-**Recomendação de firmware:**
-- Usar perfis de malha (`BED_MESH_PROFILE SAVE/LOAD`) por temperatura/material quando necessário.
-- Ativar `fade` com critério para evitar transferir ondulação para o corpo da peça.
-- Afinar `move_check_distance` e `split_delta_z` para trajetória Z mais estável.
-
-**Comandos úteis:**
-- `BED_MESH_CALIBRATE`
-- `BED_MESH_PROFILE SAVE=<nome>`
-- `BED_MESH_PROFILE LOAD=<nome>`
-- `BED_MESH_CLEAR`
+Resultado: regra aplicada de forma consistente e previsível, inclusive em limites.
 
 ---
 
-## 2.4 `PROBE_CALIBRATE` e `PROBE_ACCURACY` (z-offset robusto)
+## 3) Assistente de calibração passo-a-passo (um botão + instruções)
 
-**Função:** estabilizar Z-offset e validar repetibilidade de sonda.
+Entreguei um fluxo prático para você usar no Klipper:
 
-**Recomendação de firmware:**
-- Criar rotina padrão de calibração em macro (sempre mesma sequência).
-- Exigir `PROBE_ACCURACY` periódico e log de range/desvio.
-- Recalibrar automaticamente após alterações que invalidam offset.
+- **Arquivo de macros**: `config/sample-calibration-wizard.cfg`
+- **Guia de uso**: `docs/Calibration_Assistant_PTBR.md`
 
-**Comandos úteis:**
-- `PROBE_CALIBRATE`
-- `PROBE_ACCURACY`
-- `SAVE_CONFIG`
+### O que o assistente faz
 
----
+1. Inicia calibração por perfil (`PA`, `SHAPER`, `SPEED`).
+2. Dispara impressão de teste automática por arquivo.
+3. Recebe parâmetros do usuário (`CAL_WIZARD_SET ...`).
+4. Aplica no firmware (`CAL_WIZARD_APPLY ...`).
+5. Avança etapas com instruções claras (`CAL_WIZARD_NEXT`).
+6. Salva melhores valores via `SAVE_VARIABLE` (opcional).
 
-## 2.5 `axis_twist_compensation` (erro de leitura ao longo do X)
+### Comandos principais do assistente
 
-**Função:** corrigir viés de medição de sonda causado por torção efetiva no eixo/gantry.
+- `CAL_WIZARD_START PROFILE=PA|SHAPER|SPEED`
+- `CAL_WIZARD_PRINT_TEST PROFILE=...`
+- `CAL_WIZARD_SET ...`
+- `CAL_WIZARD_APPLY PROFILE=... [SAVE=1]`
+- `CAL_WIZARD_NEXT`
+- `CAL_WIZARD_STATUS`
 
-**Recomendação de firmware:**
-- Habilitar em máquinas onde a malha mostra padrão progressivo “lado A vs lado B”.
-- Integrar no fluxo antes de calibrações finas de mesh.
+### Interface “botão/instrução”
 
-**Comandos úteis:**
-- `AXIS_TWIST_COMPENSATION_CALIBRATE`
-
----
-
-## 2.6 `skew_correction` (ortogonalidade XY/XZ/YZ)
-
-**Função:** compensar erro angular geométrico por transformação no firmware.
-
-**Recomendação de firmware:**
-- Usar apenas após validação geométrica por peça de referência.
-- Salvar perfis de skew para cenários específicos se necessário.
-
-**Comandos úteis:**
-- `SET_SKEW XY=<ac,bd,ad> XZ=<ac,bd,ad> YZ=<ac,bd,ad>`
-- `SKEW_PROFILE SAVE=<nome>` / `SKEW_PROFILE LOAD=<nome>`
+O macro usa `RESPOND TYPE=command MSG="action:prompt_*"` para hosts compatíveis (ex.: Mainsail/Fluidd com suporte a prompt), com fallback textual via `RESPOND`/`M117`.
 
 ---
 
-## 2.7 `z_tilt`, `quad_gantry_level`, `screws_tilt_adjust` (nivelamento por arquitetura)
+## 4) Como isso te aproxima de “calibração perfeita”
 
-**Função:** alinhar plano de impressão usando os recursos próprios do Klipper.
+Você passa a ter um loop controlado:
 
-**Recomendação de firmware:**
-- Escolher **um fluxo oficial** de nivelamento conforme arquitetura da impressora.
-- Inserir no `START_PRINT` para execução condicional e segura.
+1. imprimir teste,
+2. avaliar critério específico,
+3. inserir número,
+4. aplicar ajuste,
+5. repetir,
+6. salvar melhor valor.
 
-**Comandos úteis:**
-- `Z_TILT_ADJUST`
-- `QUAD_GANTRY_LEVEL`
-- `SCREWS_TILT_CALCULATE`
-
----
-
-## 2.8 `z_thermal_adjust` (deriva de Z por temperatura)
-
-**Função:** compensar variação em Z relacionada a aquecimento.
-
-**Recomendação de firmware:**
-- Habilitar quando houver deriva reproduzível durante aquecimento/impressão.
-- Ajustar `temp_coeff` com base em medição repetível e manter limite de correção.
-
-**Comando útil:**
-- `SET_Z_THERMAL_ADJUST ENABLE=1`
-
----
-
-## 2.9 Controle dinâmico de limites (`SET_VELOCITY_LIMIT`)
-
-**Função:** adaptar desempenho por tipo de peça sem reiniciar firmware.
-
-**Recomendação de firmware:**
-- Criar presets “qualidade”, “balanceado”, “rápido” em macro.
-- Ajustar `ACCEL`, `ACCEL_TO_DECEL`, `SQUARE_CORNER_VELOCITY`, `MINIMUM_CRUISE_RATIO` em conjunto.
-
-**Comando útil:**
-- `SET_VELOCITY_LIMIT ACCEL=<v> ACCEL_TO_DECEL=<v> SQUARE_CORNER_VELOCITY=<v> MINIMUM_CRUISE_RATIO=<v>`
-
----
-
-## 2.10 `exclude_object` (inteligência em falha parcial)
-
-**Função:** excluir apenas um objeto com defeito durante impressão multi-objeto.
-
-**Recomendação de firmware:**
-- Habilitar para evitar perda total de produção.
-- Integrar no fluxo do host para marcação consistente de objetos.
-
-**Comando útil:**
-- `EXCLUDE_OBJECT NAME=<objeto>`
-
----
-
-## 3) “Pacote firmware” recomendado (alto impacto)
-
-Se a meta for qualidade + velocidade + confiabilidade usando **só Klipper**, priorize este pacote:
-
-1. `[input_shaper]`
-2. `pressure_advance` por perfil
-3. `[bed_mesh]` com perfis
-4. `[axis_twist_compensation]` (se necessário)
-5. `[z_tilt]` ou `[quad_gantry_level]` (conforme arquitetura)
-6. `[z_thermal_adjust]` (se houver deriva)
-7. `[exclude_object]`
-8. Macros de orquestração (`START_PRINT`, `END_PRINT`, `CALIBRATION_CHECK`)
-
----
-
-## 4) Fluxo de automação 100% firmware (exemplo)
-
-Macro `START_PRINT` (lógica sugerida):
-
-1. validar homing,
-2. aquecer,
-3. nivelamento automático da arquitetura (`Z_TILT_ADJUST` ou `QUAD_GANTRY_LEVEL`),
-4. carregar/gerar `bed_mesh`,
-5. aplicar preset dinâmico (`SET_VELOCITY_LIMIT`),
-6. aplicar preset de material (`SET_PRESSURE_ADVANCE`),
-7. iniciar impressão.
-
-Isso reduz variabilidade operacional e aumenta repetibilidade entre trabalhos.
-
----
-
-## 5) Inconsistências puramente de firmware a evitar
-
-1. Habilitar recursos sem rotina de ordem (ex.: mesh antes de compensações necessárias).
-2. Ajustar dinâmica sem preset/versionamento (perde rastreabilidade).
-3. Misturar parâmetros de teste e produção no mesmo perfil sem controle.
-4. Não usar perfis para PA, mesh e skew.
-5. Não validar estado antes de imprimir (macro sem checagens).
-
----
-
-## 6) KPIs para validar melhoria de firmware
-
-- Redução de ringing visual após `input_shaper`.
-- Menor variação de canto/quina após ajuste de PA + dinâmica.
-- Menos falhas de primeira camada após fluxo `nivelamento + mesh + z-offset`.
-- Menor descarte em impressão multi-objeto com `exclude_object`.
-- Maior repetibilidade entre dias usando macros e presets versionados.
-
----
-
-## 7) Conclusão objetiva
-
-Se você quer foco estritamente no Klipper, o caminho é construir um **pipeline de firmware** com:
-
-- compensações corretas,
-- presets dinâmicos,
-- perfil por contexto,
-- automação por macro,
-- validação por KPI.
-
-Se quiser, no próximo passo eu posso te entregar um **conjunto de macros pronto** (somente Klipper) com:
-- `START_PRINT` inteligente,
-- seleção automática de perfil de PA/velocidade,
-- carga de malha por perfil,
-- rotina de verificação de estado antes da impressão.
+Com isso, o processo deixa de ser “tentativa e erro solta” e vira calibração guiada e reproduzível.
