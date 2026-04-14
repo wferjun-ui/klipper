@@ -1,105 +1,128 @@
-# Assistente de calibração guiada (passo-a-passo) para Klipper
+# Calibração guiada e automática (baseline + teste por velocidade) no Klipper
 
-Este guia entrega um fluxo de calibração interativo com “um botão” usando macros.
+Este guia implementa exatamente o fluxo solicitado:
 
-Arquivo exemplo:
+1. botão para **calibração inicial automática na ordem correta**;
+2. botão para **teste automático por velocidade desejada**;
+3. botão para **executar tudo junto**;
+4. cálculo automático de parâmetros com **respeito aos limites do cfg**;
+5. aviso de segurança + checklist pós-teste com recomendações de ajuste.
+
+Arquivo principal:
 - `config/sample-calibration-wizard.cfg`
 
-## O que este assistente resolve
+---
 
-1. Executar calibração em etapas com instruções na tela.
-2. Aplicar parâmetros direto no firmware (`PA`, `SHAPER`, `SPEED`).
-3. Rodar impressão de teste automática por perfil.
-4. Receber feedback do usuário e iterar rapidamente.
-5. Persistir melhor valor com `SAVE_VARIABLE` (opcional).
+## Botões/macros principais
 
-## Pré-requisitos
+- `CAL_BTN_BASELINE` → executa baseline automático
+- `CAL_BTN_SPEED_TEST TARGET_SPEED=<mm/s>` → calcula e roda teste rápido
+- `CAL_BTN_ALL_IN_ONE TARGET_SPEED=<mm/s>` → baseline + teste
 
-No `printer.cfg`, habilite:
+Também disponíveis:
+- `CAL_POST_TEST_REVIEW`
+- `CAL_APPLY_USER_FEEDBACK ...`
 
-```ini
-[respond]
+---
 
-[save_variables]
-filename: ~/printer_data/config/variables.cfg
-```
+## Ordem automática de calibração (baseline)
 
-> Se seu host suportar prompts (`action:prompt_*`), você verá botões e caixas de texto;
-> caso contrário, as instruções aparecem via `RESPOND`/`M117`.
+Macro: `CAL_AUTO_BASELINE`
 
-## Fluxo recomendado
+Sequência executada:
+1. `G28`
+2. Nivelamento por arquitetura (condicional):
+   - `QUAD_GANTRY_LEVEL` ou
+   - `Z_TILT_ADJUST` ou
+   - `SCREWS_TILT_CALCULATE`
+3. `BED_MESH_CLEAR` + `BED_MESH_CALIBRATE` (se `bed_mesh` existir)
+4. Orientação para refinamento com `PROBE_CALIBRATE` (quando aplicável)
 
-### 1) Iniciar assistente
+> O fluxo usa detecção condicional de módulos e evita comandos inexistentes.
 
-```gcode
-CAL_WIZARD_START PROFILE=PA
-```
+---
 
-Perfis aceitos:
-- `PA`
-- `SHAPER`
-- `SPEED`
+## Cálculo automático por velocidade desejada
 
-### 2) Rodar teste automático
+Macro: `CAL_AUTO_SPEED_TEST TARGET_SPEED=<mm/s>`
 
-```gcode
-CAL_WIZARD_PRINT_TEST PROFILE=PA
-```
+Entradas:
+- velocidade desejada do usuário (`TARGET_SPEED`)
 
-Edite os nomes de arquivo no macro para seus testes reais no virtual SD.
+Regras de segurança:
+- `effective_speed = min(TARGET_SPEED, printer.toolhead.max_velocity)`
+- aceleração calculada e limitada por `printer.toolhead.max_accel`
+- `ACCEL_TO_DECEL <= ACCEL`
+- `SCV` limitado em faixa segura
 
-### 3) Informar ajuste após avaliação visual
+Parâmetros aplicados automaticamente:
+- `SET_VELOCITY_LIMIT VELOCITY=... ACCEL=... ACCEL_TO_DECEL=... SQUARE_CORNER_VELOCITY=...`
+
+> Os parâmetros calculados são estimativa inicial teórica segura, não “valor perfeito absoluto”. O ciclo de feedback é obrigatório para convergência prática.
+
+---
+
+## Impressão de teste rápida para avaliar qualidade
+
+Macro: `CAL_PRINT_QUICK_DIAGNOSTIC`
+
+O padrão inclui:
+- perímetro quadrado (cantos/SCV),
+- diagonais (ringing/dinâmica),
+- linhas paralelas (constância de fluxo).
+
+Isso reduz tempo de teste e permite avaliação visual objetiva.
+
+---
+
+## Pós-teste: perguntas e instruções ao usuário
+
+Macro: `CAL_POST_TEST_REVIEW`
+
+Mostra orientações diretas:
+- blob em cantos → reduzir PA em passos pequenos,
+- canto vazio → aumentar PA em passos pequenos,
+- ringing → reduzir aceleração e revisar shaper,
+- linhas faltando → reduzir velocidade e revisar temperatura,
+- canto arredondado → reduzir SCV,
+- impacto agressivo → reduzir `ACCEL_TO_DECEL`.
+
+Para hosts compatíveis, há prompt em tela (`action:prompt_*`).
+
+---
+
+## Aplicação rápida de feedback
+
+Macro: `CAL_APPLY_USER_FEEDBACK`
 
 Exemplos:
-
 ```gcode
-CAL_WIZARD_SET PA=0.034
-CAL_WIZARD_SET FREQ_X=48.2 FREQ_Y=39.4
-CAL_WIZARD_SET ACCEL=7000 SCV=6.5
+CAL_APPLY_USER_FEEDBACK ACCEL_FACTOR=0.85
+CAL_APPLY_USER_FEEDBACK SCV_DELTA=-0.8
+CAL_APPLY_USER_FEEDBACK SPEED_FACTOR=0.9
 ```
 
-### 4) Aplicar ajuste no firmware
+A macro aplica clamp novamente pelos limites do cfg.
 
+---
+
+## Fluxo recomendado (curto)
+
+1. `CAL_BTN_BASELINE`
+2. `CAL_BTN_SPEED_TEST TARGET_SPEED=150`
+3. `CAL_POST_TEST_REVIEW`
+4. `CAL_APPLY_USER_FEEDBACK ...`
+5. repetir 2-4 até convergir.
+
+Fluxo único:
 ```gcode
-CAL_WIZARD_APPLY PROFILE=PA
+CAL_BTN_ALL_IN_ONE TARGET_SPEED=150
 ```
 
-Para salvar melhor valor:
+---
 
-```gcode
-CAL_WIZARD_APPLY PROFILE=PA SAVE=1
-```
+## Avisos importantes
 
-### 5) Avançar no passo-a-passo
-
-```gcode
-CAL_WIZARD_NEXT
-```
-
-### 6) Consultar estado
-
-```gcode
-CAL_WIZARD_STATUS
-```
-
-## Critérios de avaliação por perfil
-
-### PA
-- Redução de blob em quinas.
-- Costura menos evidente.
-- Sem sub/sobre-extrusão em mudanças bruscas.
-
-### SHAPER
-- Menos eco/ringing após arestas.
-- Sem excesso de suavização de detalhes finos.
-
-### SPEED
-- Sem perda de passos.
-- Sem degradação forte de superfície.
-- Ganho real de tempo com qualidade aceitável.
-
-## Observações importantes
-
-- O assistente é iterativo: teste -> feedback -> aplica -> reteste.
-- Valores ideais variam por material e perfil de uso.
-- Mantenha presets versionados para rastreabilidade.
+- Antes de testar, aqueça cama/bico para condições reais.
+- Use incrementos pequenos (5-15% para dinâmica; 0.002-0.005 para PA).
+- Mesmo com automação, mantenha validação visual e métricas de peça.

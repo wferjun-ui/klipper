@@ -1,86 +1,84 @@
-# Análise crítica de funções do Klipper + melhorias propostas/implementadas
+# Melhorias implementadas: calibração automática em ordem + teste guiado por velocidade
 
-Este documento foi refeito para focar no que você pediu:
+Atendendo ao pedido, a solução foi evoluída para um fluxo mais automático e prático:
 
-1. **melhorar funções** (não só listar recursos),
-2. **analisar fragilidades reais**,
-3. **entregar um fluxo guiado de calibração passo-a-passo com botão/instrução ao usuário**.
-
----
-
-## 1) Fragilidades detectadas em função real do código
-
-Módulo analisado: `klippy/extras/screws_tilt_adjust.py`
-
-### Fragilidade A — arredondamento de minutos pode gerar `:60`
-
-Na função de cálculo de ajuste das roscas, o arredondamento de minutos podia produzir `60`, resultando em saída inválida/estranha para o usuário (ex.: `02:60`).
-
-### Fragilidade B — validação de `MAX_DEVIATION` dependia de truthy/falsy
-
-A validação usava `if self.max_diff ...`, o que ignora casos limite (ex.: `0.0`) por comportamento booleano, ao invés de checagem explícita.
+1. botão de **calibração inicial automática**;
+2. botão de **teste por velocidade desejada** com cálculo automático;
+3. botão de **execução completa (all-in-one)**;
+4. pós-teste com perguntas/instruções de ajuste.
 
 ---
 
-## 2) Melhorias implementadas no código
+## 1) Correções reais de fragilidade em função do Klipper
 
-### Melhoria 1 — normalização de minuto 60 -> incremento de volta completa
+Arquivo: `klippy/extras/screws_tilt_adjust.py`
 
-Quando o arredondamento gera 60 minutos:
-- incrementa `full_turns` em 1,
-- força `minutes = 0`.
+- Corrigido edge-case de arredondamento que podia resultar em `:60` minutos no ajuste.
+- Tornada explícita a validação de desvio máximo com `is not None`.
 
-Resultado: saída sempre coerente no formato de ajuste.
-
-### Melhoria 2 — comparação robusta para `MAX_DEVIATION`
-
-Troca de condição para:
-- `self.max_diff is not None`
-
-Resultado: regra aplicada de forma consistente e previsível, inclusive em limites.
+Resultado: saída mais estável e validação mais previsível.
 
 ---
 
-## 3) Assistente de calibração passo-a-passo (um botão + instruções)
+## 2) Calibração automática “na ordem correta”
 
-Entreguei um fluxo prático para você usar no Klipper:
+Arquivo: `config/sample-calibration-wizard.cfg`
 
-- **Arquivo de macros**: `config/sample-calibration-wizard.cfg`
-- **Guia de uso**: `docs/Calibration_Assistant_PTBR.md`
+Macro principal: `CAL_AUTO_BASELINE` (botão `CAL_BTN_BASELINE`)
 
-### O que o assistente faz
-
-1. Inicia calibração por perfil (`PA`, `SHAPER`, `SPEED`).
-2. Dispara impressão de teste automática por arquivo.
-3. Recebe parâmetros do usuário (`CAL_WIZARD_SET ...`).
-4. Aplica no firmware (`CAL_WIZARD_APPLY ...`).
-5. Avança etapas com instruções claras (`CAL_WIZARD_NEXT`).
-6. Salva melhores valores via `SAVE_VARIABLE` (opcional).
-
-### Comandos principais do assistente
-
-- `CAL_WIZARD_START PROFILE=PA|SHAPER|SPEED`
-- `CAL_WIZARD_PRINT_TEST PROFILE=...`
-- `CAL_WIZARD_SET ...`
-- `CAL_WIZARD_APPLY PROFILE=... [SAVE=1]`
-- `CAL_WIZARD_NEXT`
-- `CAL_WIZARD_STATUS`
-
-### Interface “botão/instrução”
-
-O macro usa `RESPOND TYPE=command MSG="action:prompt_*"` para hosts compatíveis (ex.: Mainsail/Fluidd com suporte a prompt), com fallback textual via `RESPOND`/`M117`.
+Ordem automática:
+1. `G28`
+2. nivelamento condicional pela arquitetura (`QUAD_GANTRY_LEVEL` / `Z_TILT_ADJUST` / `SCREWS_TILT_CALCULATE`)
+3. `BED_MESH_CLEAR` + `BED_MESH_CALIBRATE` (quando disponível)
+4. orientação de refinamento final para `PROBE_CALIBRATE`.
 
 ---
 
-## 4) Como isso te aproxima de “calibração perfeita”
+## 3) Teste automático por velocidade desejada
 
-Você passa a ter um loop controlado:
+Macro principal: `CAL_AUTO_SPEED_TEST TARGET_SPEED=<mm/s>` (botão `CAL_BTN_SPEED_TEST`)
 
-1. imprimir teste,
-2. avaliar critério específico,
-3. inserir número,
-4. aplicar ajuste,
-5. repetir,
-6. salvar melhor valor.
+Implementação:
+- recebe velocidade alvo do usuário,
+- aplica clamp pelos limites do cfg (`max_velocity`, `max_accel`),
+- calcula automaticamente `ACCEL`, `ACCEL_TO_DECEL`, `SCV` iniciais,
+- aplica via `SET_VELOCITY_LIMIT`,
+- executa teste rápido integrado (`CAL_PRINT_QUICK_DIAGNOSTIC`).
 
-Com isso, o processo deixa de ser “tentativa e erro solta” e vira calibração guiada e reproduzível.
+Inclui mensagens de segurança e advertências de validação.
+
+---
+
+## 4) Pós-teste guiado com instruções de ajuste
+
+Macros:
+- `CAL_POST_TEST_REVIEW`
+- `CAL_APPLY_USER_FEEDBACK`
+
+Pós-teste orienta o usuário com regras objetivas:
+- blob em cantos -> reduzir PA,
+- canto vazio -> aumentar PA,
+- ringing -> reduzir aceleração,
+- linhas faltando -> reduzir velocidade,
+- canto arredondado -> reduzir SCV,
+- impacto agressivo -> reduzir `ACCEL_TO_DECEL`.
+
+---
+
+## 5) Botão para executar tudo junto
+
+Macro: `CAL_BTN_ALL_IN_ONE TARGET_SPEED=<mm/s>`
+
+Executa:
+1. baseline automático,
+2. cálculo de parâmetros + teste rápido,
+3. pronto para revisão guiada.
+
+---
+
+## 6) Limitações transparentes
+
+- “Perfeição teórica” absoluta não é garantível sem iteração, porque material/temperatura/estado real variam.
+- A implementação gera **ponto inicial otimizado e seguro**, depois converge com feedback visual do usuário.
+
+Esse é o caminho mais robusto para chegar perto do ideal com segurança.
