@@ -112,7 +112,12 @@ class ScrewsTiltAdjust:
                 adjust = abs(adjust)
                 full_turns = math.trunc(adjust)
                 decimal_part = adjust - full_turns
-                minutes = round(decimal_part * 60, 0)
+                minutes = int(round(decimal_part * 60, 0))
+                if minutes == 60:
+                    # Clamp edge-case caused by rounding (eg, 0.9995 turn)
+                    # so output remains valid MM:SS-style turns.
+                    full_turns += 1
+                    minutes = 0
                 # Show the results
                 self.gcode.respond_info(
                     "%s : x=%.1f, y=%.1f, z=%.5f : adjust %s %02d:%02d" %
@@ -120,7 +125,8 @@ class ScrewsTiltAdjust:
                 self.results["screw%d" % (i + 1,)] = {'z': z, 'sign': sign,
                     'adjust':"%02d:%02d" % (full_turns, minutes),
                     'is_base': False}
-        if self.max_diff and any((d > self.max_diff) for d in screw_diff):
+        if (self.max_diff is not None
+                and any((d > self.max_diff) for d in screw_diff)):
             self.max_diff_error = True
             raise self.gcode.error(
                 "bed level exceeds configured limits ({}mm)! " \
