@@ -5063,6 +5063,41 @@ switch_pin:
 #   above parameters.
 ```
 
+### [closed_loop_print_control]
+
+Experimental closed-loop extrusion compensation module. It consumes
+external flow estimates from one or more sensors and computes a
+real-time correction factor using a PID + feedforward hybrid controller.
+
+Use `CLPC_SENSOR_UPDATE` to feed expected flow and measured sensor data,
+`SET_CLPC MODE=ENABLE` to enable the loop, and `CLPC_STATUS` for
+telemetry.
+
+```
+[closed_loop_print_control]
+#control_period: 0.02
+#   Control period in seconds. Maximum is 0.02s (20ms).
+#sensor_timeout: 0.1
+#   Time without sensor updates before entering safe fallback mode.
+#safe_fallback_scale: 1.0
+#   Correction scale applied during sensor timeout/failure.
+
+#flow_kp: 0.10
+#flow_ki: 0.02
+#flow_kd: 0.0
+#flow_kff: 1.0
+#integrator_limit: 1.0
+#max_correction: 0.25
+#max_slew_rate: 5.0
+#   Hybrid PID + feedforward controller parameters and smoothing limits.
+
+#encoder_weight: 0.60
+#load_cell_weight: 0.30
+#optical_weight: 0.10
+#camera_weight: 0.0
+#   Sensor-fusion weights used to estimate real flow.
+```
+
 ### [tsl1401cl_filament_width_sensor]
 
 TSLl401CL Based Filament Width Sensor. See the
