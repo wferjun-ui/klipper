@@ -6,6 +6,83 @@
 import math, logging
 import stepper, chelper
 
+class NonLinearPressureAdvance:
+    def __init__(self, config):
+        self.enabled = config.getboolean('nlpa_enable', False)
+        self.base_gain = config.getfloat('nlpa_base_gain', 0., minval=0.)
+        self.accel_gain = config.getfloat('nlpa_accel_gain', 0., minval=0.)
+        self.curvature_gain = config.getfloat('nlpa_curvature_gain', 0., minval=0.)
+        self.temp_gain = config.getfloat('nlpa_temp_gain', 0., minval=0.)
+        self.filament_compressibility = config.getfloat(
+            'nlpa_filament_compressibility', 1., minval=0.)
+        self.smoothing = config.getfloat('nlpa_smoothing', 0.20, minval=0., maxval=1.)
+        self.max_adjustment = config.getfloat('nlpa_max_adjustment', 0.25, minval=0.)
+        self.min_speed = config.getfloat('nlpa_min_speed', 0.001, minval=0.)
+        self.nominal_temp = config.getfloat('nlpa_nominal_temp', 210.)
+        self._smooth_adjustment = 0.
+        self._last_unit_vec = None
+
+    def _safe_ratio(self, v, a):
+        return a / max(v * v, self.min_speed * self.min_speed)
+
+    def preprocess_gcode_segments(self, prev_move, move):
+        dx = move.axes_d[0]
+        dy = move.axes_d[1]
+        move_d = max(move.move_d, self.min_speed)
+        ux = dx / move_d
+        uy = dy / move_d
+        curvature = 0.
+        segment_type = 'line_segment'
+        if prev_move is not None and prev_move.move_d > self.min_speed:
+            pux = prev_move.axes_d[0] / prev_move.move_d
+            puy = prev_move.axes_d[1] / prev_move.move_d
+            dot = max(-1., min(1., pux * ux + puy * uy))
+            angle = math.acos(dot)
+            curvature = angle / move_d
+            if angle > 0.35:
+                segment_type = 'corner_transition'
+            elif angle > 0.08:
+                segment_type = 'arc_approximation'
+        self._last_unit_vec = (ux, uy)
+        return {'segment_type': segment_type, 'curvature': curvature,
+                'speed': move.cruise_v, 'accel': move.accel}
+
+    def compute_flow_adjustment(self, v, a, curvature, temperature,
+                                filament_compressibility):
+        if not self.enabled:
+            return 0.
+        speed_term = self.base_gain * math.sqrt(max(v, self.min_speed))
+        accel_term = self.accel_gain * self._safe_ratio(v, abs(a))
+        curvature_term = self.curvature_gain * curvature * max(v, self.min_speed)
+        temp_term = self.temp_gain * (self.nominal_temp - temperature)
+        comp = max(0., filament_compressibility)
+        target = comp * (speed_term + accel_term + curvature_term + temp_term)
+        target = max(-self.max_adjustment, min(self.max_adjustment, target))
+        smooth = self.smoothing
+        self._smooth_adjustment += smooth * (target - self._smooth_adjustment)
+        return self._smooth_adjustment
+
+    def set_runtime_overrides(self, enabled=None, base_gain=None, accel_gain=None,
+                              curvature_gain=None, temp_gain=None,
+                              filament_compressibility=None, smoothing=None,
+                              max_adjustment=None):
+        if enabled is not None:
+            self.enabled = bool(enabled)
+        if base_gain is not None:
+            self.base_gain = max(0., base_gain)
+        if accel_gain is not None:
+            self.accel_gain = max(0., accel_gain)
+        if curvature_gain is not None:
+            self.curvature_gain = max(0., curvature_gain)
+        if temp_gain is not None:
+            self.temp_gain = max(0., temp_gain)
+        if filament_compressibility is not None:
+            self.filament_compressibility = max(0., filament_compressibility)
+        if smoothing is not None:
+            self.smoothing = max(0., min(1., smoothing))
+        if max_adjustment is not None:
+            self.max_adjustment = max(0., max_adjustment)
+
 class ExtruderStepper:
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -38,6 +115,9 @@ class ExtruderStepper:
         gcode.register_mux_command("SYNC_EXTRUDER_MOTION", "EXTRUDER",
                                    self.name, self.cmd_SYNC_EXTRUDER_MOTION,
                                    desc=self.cmd_SYNC_EXTRUDER_MOTION_help)
+        gcode.register_mux_command("SET_NLPA", "EXTRUDER", self.name,
+                                   self.cmd_SET_NLPA,
+                                   desc=self.cmd_SET_NLPA_help)
     def _handle_connect(self):
         self._set_pressure_advance(self.config_pa, self.config_smooth_time)
     def get_status(self, eventtime):
@@ -135,6 +215,28 @@ class ExtruderStepper:
         self.sync_to_extruder(ename)
         gcmd.respond_info("Extruder '%s' now syncing with '%s'"
                           % (self.name, ename))
+    cmd_SET_NLPA_help = "Set non-linear pressure advance parameters"
+    def cmd_SET_NLPA(self, gcmd):
+        enabled = gcmd.get_int('ENABLE', None, minval=0, maxval=1)
+        self.nlpa.set_runtime_overrides(
+            enabled=enabled,
+            base_gain=gcmd.get_float('BASE_GAIN', None, minval=0.),
+            accel_gain=gcmd.get_float('ACCEL_GAIN', None, minval=0.),
+            curvature_gain=gcmd.get_float('CURVATURE_GAIN', None, minval=0.),
+            temp_gain=gcmd.get_float('TEMP_GAIN', None, minval=0.),
+            filament_compressibility=gcmd.get_float(
+                'COMPRESSIBILITY', None, minval=0.),
+            smoothing=gcmd.get_float('SMOOTHING', None, minval=0., maxval=1.),
+            max_adjustment=gcmd.get_float('MAX_ADJUSTMENT', None, minval=0.))
+        gcmd.respond_info("nlpa_enable: %d\nnlpa_base_gain: %.6f\n"
+                          "nlpa_accel_gain: %.6f\nnlpa_curvature_gain: %.6f\n"
+                          "nlpa_temp_gain: %.6f\nnlpa_compressibility: %.6f\n"
+                          "nlpa_smoothing: %.6f"
+                          % (int(self.nlpa.enabled), self.nlpa.base_gain,
+                             self.nlpa.accel_gain, self.nlpa.curvature_gain,
+                             self.nlpa.temp_gain,
+                             self.nlpa.filament_compressibility,
+                             self.nlpa.smoothing), log=False)
 
 # Tracking for hotend heater, extrusion motion queue, and extruder stepper
 class PrinterExtruder:
@@ -169,6 +271,8 @@ class PrinterExtruder:
             'max_extrude_only_distance', 50., minval=0.)
         self.instant_corner_v = config.getfloat(
             'instantaneous_corner_velocity', 1., minval=0.)
+        self.nlpa = NonLinearPressureAdvance(config)
+        self._prev_move = None
         # Setup extruder trapq (trapezoidal motion queue)
         self.motion_queuing = self.printer.load_object(config, 'motion_queuing')
         self.trapq = self.motion_queuing.allocate_trapq()
@@ -240,6 +344,14 @@ class PrinterExtruder:
         return move.max_cruise_v2
     def process_move(self, print_time, move, ea_index):
         axis_r = move.axes_r[ea_index]
+        if axis_r > 0. and (move.axes_d[0] or move.axes_d[1]):
+            profile = self.nlpa.preprocess_gcode_segments(self._prev_move, move)
+            adjustment = self.nlpa.compute_flow_adjustment(
+                profile['speed'], profile['accel'], profile['curvature'],
+                self.heater.get_temp(print_time),
+                self.nlpa.filament_compressibility)
+            axis_r *= (1. + adjustment)
+        axis_r = max(0., axis_r)
         accel = move.accel * axis_r
         start_v = move.start_v * axis_r
         cruise_v = move.cruise_v * axis_r
@@ -253,6 +365,7 @@ class PrinterExtruder:
                           1., can_pressure_advance, 0.,
                           start_v, cruise_v, accel)
         self.last_position = move.end_pos[ea_index]
+        self._prev_move = move
     def find_past_position(self, print_time):
         if self.extruder_stepper is None:
             return 0.
